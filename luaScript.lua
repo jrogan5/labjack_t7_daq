@@ -50,9 +50,12 @@ local MUX_CONFIGS = {
   }
 }
 
--- PT Sensor Configuration
-local PT_AIN_POS = 6             -- AIN6+ for PT sensor (differential)
-local PT_AIN_NEG = 7             -- AIN7- for PT sensor (differential)
+-- PT Sensor Configuration (4-20mA Current Loop)
+-- For 4-20mA sensors, use a shunt resistor to convert current to voltage
+-- Common values: 50Ω (0.2-1.0V), 100Ω (0.4-2.0V), 249Ω (1.0-5.0V)
+local PT_AIN = 6                 -- AIN6 for PT sensor (single-ended)
+local PT_SHUNT_RESISTOR = 100    -- Shunt resistor value in Ohms (default: 100Ω)
+                                  -- 4mA * 100Ω = 0.4V, 20mA * 100Ω = 2.0V
 
 -- Data Output Configuration
 -- Results stored in USER_RAM registers for reading by host computer
@@ -72,7 +75,7 @@ print("==============================================")
 print("LabJack T7 Strain Gauge & PT DAQ System")
 print("==============================================")
 print(string.format("Strain Gauges: %d (Gain: %d)", NUM_STRAIN_GAUGES, STRAIN_GAIN))
-print(string.format("PT Sensor: AIN%d/AIN%d (Gain: %d)", PT_AIN_POS, PT_AIN_NEG, PT_GAIN))
+print(string.format("PT Sensor (4-20mA): AIN%d, Shunt: %dΩ, Gain: %d", PT_AIN, PT_SHUNT_RESISTOR, PT_GAIN))
 print(string.format("Scan Rate: %d ms", SCAN_RATE_MS))
 print("==============================================")
 
@@ -178,9 +181,40 @@ local function readStrainGauge(mux_index, channel_index)
   return voltage
 end
 
--- Function to read PT sensor
+-- Function to read single-ended analog input with specified gain
+local function readSingleEnded(ain_channel, gain)
+  -- Set gain for channel
+  local gain_name = string.format("AIN%d_RANGE", ain_channel)
+
+  -- LabJack gain to range mapping:
+  -- Gain 1 = ±10V (range = 10.0)
+  -- Gain 10 = ±1V (range = 1.0)
+  -- Gain 100 = ±0.1V (range = 0.1)
+  -- Gain 1000 = ±0.01V (range = 0.01)
+  local range = 10.0 / gain
+  MB.writeName(gain_name, range)
+
+  -- Set to single-ended mode (negative channel = 199 for GND)
+  local neg_ch_name = string.format("AIN%d_NEGATIVE_CH", ain_channel)
+  MB.writeName(neg_ch_name, 199)
+
+  -- Perform read
+  local voltage_name = string.format("AIN%d", ain_channel)
+  local voltage = MB.readName(voltage_name)
+
+  return voltage
+end
+
+-- Function to read PT sensor (4-20mA current loop)
 local function readPTSensor()
-  return readDifferential(PT_AIN_POS, PT_AIN_NEG, PT_GAIN)
+  -- Read voltage across shunt resistor
+  local voltage = readSingleEnded(PT_AIN, PT_GAIN)
+
+  -- Convert voltage to current using Ohm's law: I = V / R
+  -- Current in milliamps
+  local current_mA = (voltage / PT_SHUNT_RESISTOR) * 1000
+
+  return current_mA
 end
 
 --------------------------------------------------------------------------------
@@ -221,13 +255,13 @@ while true do
     end
   end
 
-  -- Read PT sensor
-  local pt_voltage = readPTSensor()
+  -- Read PT sensor (returns current in mA)
+  local pt_current = readPTSensor()
   local pt_ram_name = string.format("USER_RAM%d_F32", USER_RAM_PT - 46000)
-  MB.writeName(pt_ram_name, pt_voltage)
+  MB.writeName(pt_ram_name, pt_current)
 
   if scan_count == 0 then
-    print(string.format("PT Sensor: %.6f V", pt_voltage))
+    print(string.format("PT Sensor: %.3f mA", pt_current))
     print("==============================================")
     print("Data acquisition running. Output to USER_RAM.")
   end
