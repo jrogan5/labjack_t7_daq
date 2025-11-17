@@ -1,8 +1,30 @@
 --------------------------------------------------------------------------------
 -- LabJack T7 - MUX80 Strain Gauge & PT Sensor Data Acquisition
 -- Purpose: Read 9 differential strain gauges via MUX80 and 1 PT sensor
+-- Kipling Compatible - Real-time plotting enabled
 -- Author: Generated for LabJack T7 DAQ System
--- Date: 2025-11-16
+-- Date: 2025-11-17
+--------------------------------------------------------------------------------
+--
+-- HOW TO USE IN KIPLING:
+-- 1. Open Kipling and connect to your T7
+-- 2. Go to the Lua Script Debugger tab
+-- 3. Paste this script into the editor
+-- 4. Configure the parameters below (gain, channels, timing, etc.)
+-- 5. Click "Run Script" to start data acquisition
+-- 6. Real-time data will print to console (can be plotted in Kipling)
+-- 7. Optional: Enable CSV logging to microSD card
+--
+-- REAL-TIME PLOTTING:
+-- - Data is printed in CSV format: timestamp,sg1,sg2,...,sg9,pt
+-- - Use Kipling's "Graph" feature to visualize data in real-time
+-- - Adjust PRINT_INTERVAL_MS to control update rate
+--
+-- MUX80 X4 CONNECTOR NOTES:
+-- - X4 FIO0-FIO7 map to extended channels AIN88-AIN95
+-- - For differential: negative channel = positive channel + 8
+-- - Example: AIN88(+) pairs with AIN96(-), AIN89(+) with AIN97(-), etc.
+--
 --------------------------------------------------------------------------------
 
 -- Disable truncation warnings
@@ -21,15 +43,17 @@ local PT_GAIN = 1                -- Gain for PT sensor channel
 local NUM_STRAIN_GAUGES = 9      -- Total number of strain gauges
 
 -- MUX80 Configuration
+-- NOTE: If using X4 connector, update ain_pos to use extended channels (88-95)
 -- The MUX80 in X4 mode provides 4 differential channels per board
 -- For 9 channels, you'll need 3 MUX80 boards (or 2 boards + 1 direct channel)
 local MUX_CONFIGS = {
   -- MUX80 #1 - Strain Gauges 1-4
+  -- Using standard AINs (for CB15 or direct connection)
   {
     enable_dio = 0,              -- DIO line for MUX enable (FIO0)
     address_dio = {1, 2},        -- DIO lines for address bits (FIO1, FIO2)
     ain_pos = 0,                 -- AIN0+ for differential input
-    ain_neg = 1,                 -- AIN1- for differential input
+    ain_neg = 1,                 -- AIN1- for differential input (or ain_pos+8 for extended)
     num_channels = 4             -- Number of channels on this MUX
   },
   -- MUX80 #2 - Strain Gauges 5-8
@@ -40,7 +64,7 @@ local MUX_CONFIGS = {
     ain_neg = 3,                 -- AIN3- for differential input
     num_channels = 4             -- Number of channels on this MUX
   },
-  -- MUX80 #3 - Strain Gauge 9 (or use direct connection)
+  -- MUX80 #3 - Strain Gauge 9
   {
     enable_dio = 6,              -- DIO line for MUX enable (FIO6)
     address_dio = {7, 8},        -- DIO lines for address bits (FIO7, EIO0)
@@ -65,7 +89,13 @@ local USER_RAM_STATUS = 46022    -- Status register (0=ok, >0=error code)
 
 -- Timing Configuration
 local SCAN_RATE_MS = 100         -- Time between complete scans (milliseconds)
+local PRINT_INTERVAL_MS = 500    -- Time between console prints for plotting (ms)
 local SETTLING_TIME_US = 500     -- Settling time after MUX switch (microseconds)
+
+-- Data Logging Configuration (T7-Pro with microSD card)
+local ENABLE_FILE_LOGGING = false -- Set to true to enable CSV logging to SD card
+local LOG_FILENAME = "daq_log.csv" -- CSV file name on microSD card
+local LOG_INTERVAL_MS = 1000     -- Time between file writes (ms)
 
 --------------------------------------------------------------------------------
 -- INITIALIZATION
@@ -73,10 +103,13 @@ local SETTLING_TIME_US = 500     -- Settling time after MUX switch (microseconds
 
 print("==============================================")
 print("LabJack T7 Strain Gauge & PT DAQ System")
+print("Kipling Real-Time Data Acquisition")
 print("==============================================")
 print(string.format("Strain Gauges: %d (Gain: %d)", NUM_STRAIN_GAUGES, STRAIN_GAIN))
 print(string.format("PT Sensor (4-20mA): AIN%d, Shunt: %dΩ, Gain: %d", PT_AIN, PT_SHUNT_RESISTOR, PT_GAIN))
 print(string.format("Scan Rate: %d ms", SCAN_RATE_MS))
+print(string.format("Print Interval: %d ms", PRINT_INTERVAL_MS))
+print(string.format("CSV Logging: %s", ENABLE_FILE_LOGGING and "ENABLED" or "DISABLED"))
 print("==============================================")
 
 -- Configure all DIO pins as outputs for MUX control
@@ -103,8 +136,50 @@ end
 MB.writeName("AIN_ALL_RESOLUTION_INDEX", 8)  -- Higher resolution
 MB.writeName("AIN_ALL_SETTLING_US", SETTLING_TIME_US)
 
+-- Initialize file logging if enabled
+local log_file = nil
+if ENABLE_FILE_LOGGING then
+  -- Check if device has SD card support
+  local has_sd = pcall(function() MB.readName("FILE_IO_SIZE_BYTES") end)
+  if has_sd then
+    log_file = io.open(LOG_FILENAME, "w")
+    if log_file then
+      -- Write CSV header
+      local header = "Timestamp_ms"
+      for i = 1, NUM_STRAIN_GAUGES do
+        header = header .. string.format(",SG%d_V", i)
+      end
+      header = header .. ",PT_mA\n"
+      log_file:write(header)
+      log_file:flush()
+      print(string.format("Logging to: %s", LOG_FILENAME))
+    else
+      print("ERROR: Could not open log file!")
+      ENABLE_FILE_LOGGING = false
+    end
+  else
+    print("WARNING: SD card not detected. Logging disabled.")
+    ENABLE_FILE_LOGGING = false
+  end
+end
+
+-- Setup interval timers for periodic operations
+LJ.IntervalConfig(0, SCAN_RATE_MS)      -- Interval 0: Data acquisition
+LJ.IntervalConfig(1, PRINT_INTERVAL_MS) -- Interval 1: Console output
+if ENABLE_FILE_LOGGING then
+  LJ.IntervalConfig(2, LOG_INTERVAL_MS) -- Interval 2: File logging
+end
+
 print("Initialization complete. Starting acquisition...")
 print("==============================================")
+
+-- Print CSV header for Kipling plotting
+local csv_header = "Time_ms"
+for i = 1, NUM_STRAIN_GAUGES do
+  csv_header = csv_header .. string.format(",SG%d", i)
+end
+csv_header = csv_header .. ",PT"
+print(csv_header)
 
 --------------------------------------------------------------------------------
 -- HELPER FUNCTIONS
@@ -159,28 +234,6 @@ local function readDifferential(ain_pos, ain_neg, gain)
   return voltage
 end
 
--- Function to read a single strain gauge via MUX
-local function readStrainGauge(mux_index, channel_index)
-  local mux = MUX_CONFIGS[mux_index]
-
-  -- Set MUX address
-  setMuxAddress(mux, channel_index)
-
-  -- Enable MUX
-  setMuxEnable(mux, true)
-
-  -- Wait for settling
-  MB.wait(SETTLING_TIME_US)
-
-  -- Read differential input with gain
-  local voltage = readDifferential(mux.ain_pos, mux.ain_neg, STRAIN_GAIN)
-
-  -- Disable MUX
-  setMuxEnable(mux, false)
-
-  return voltage
-end
-
 -- Function to read single-ended analog input with specified gain
 local function readSingleEnded(ain_channel, gain)
   -- Set gain for channel
@@ -205,6 +258,28 @@ local function readSingleEnded(ain_channel, gain)
   return voltage
 end
 
+-- Function to read a single strain gauge via MUX
+local function readStrainGauge(mux_index, channel_index)
+  local mux = MUX_CONFIGS[mux_index]
+
+  -- Set MUX address
+  setMuxAddress(mux, channel_index)
+
+  -- Enable MUX
+  setMuxEnable(mux, true)
+
+  -- Wait for settling
+  MB.wait(SETTLING_TIME_US)
+
+  -- Read differential input with gain
+  local voltage = readDifferential(mux.ain_pos, mux.ain_neg, STRAIN_GAIN)
+
+  -- Disable MUX
+  setMuxEnable(mux, false)
+
+  return voltage
+end
+
 -- Function to read PT sensor (4-20mA current loop)
 local function readPTSensor()
   -- Read voltage across shunt resistor
@@ -224,72 +299,97 @@ end
 local scan_count = 0
 local error_count = 0
 
--- Calculate interval in microseconds
-local interval_us = SCAN_RATE_MS * 1000
+-- Data buffers for current readings
+local strain_voltages = {}
+local pt_current = 0
+
+-- Timing
+local start_time = MB.readName("CORE_TIMER")  -- Microseconds
 
 while true do
-  local loop_start = MB.readName("CORE_TIMER")
+  -- Check if it's time to acquire data
+  local scan_interval = LJ.CheckInterval(0)
 
-  -- Clear status
-  MB.writeName(string.format("USER_RAM%d_F32", USER_RAM_STATUS - 46000), 0)
+  if scan_interval == 1 then
+    -- Clear status
+    MB.writeName(string.format("USER_RAM%d_F32", USER_RAM_STATUS - 46000), 0)
 
-  -- Read all strain gauges
-  local strain_index = 0
-  for mux_idx, mux in ipairs(MUX_CONFIGS) do
-    for ch = 0, mux.num_channels - 1 do
-      strain_index = strain_index + 1
-      if strain_index <= NUM_STRAIN_GAUGES then
-        -- Read strain gauge
-        local voltage = readStrainGauge(mux_idx, ch)
+    -- Read all strain gauges
+    local strain_index = 0
+    for mux_idx, mux in ipairs(MUX_CONFIGS) do
+      for ch = 0, mux.num_channels - 1 do
+        strain_index = strain_index + 1
+        if strain_index <= NUM_STRAIN_GAUGES then
+          -- Read strain gauge
+          local voltage = readStrainGauge(mux_idx, ch)
+          strain_voltages[strain_index] = voltage
 
-        -- Store in USER_RAM (each reading takes 4 bytes as F32)
-        local ram_addr = USER_RAM_BASE + (strain_index - 1) * 2
-        local ram_name = string.format("USER_RAM%d_F32", ram_addr - 46000)
-        MB.writeName(ram_name, voltage)
-
-        -- Debug output for first scan
-        if scan_count == 0 then
-          print(string.format("Strain Gauge %d: %.6f V", strain_index, voltage))
+          -- Store in USER_RAM (each reading takes 4 bytes as F32)
+          local ram_addr = USER_RAM_BASE + (strain_index - 1) * 2
+          local ram_name = string.format("USER_RAM%d_F32", ram_addr - 46000)
+          MB.writeName(ram_name, voltage)
         end
       end
     end
+
+    -- Read PT sensor (returns current in mA)
+    pt_current = readPTSensor()
+    local pt_ram_name = string.format("USER_RAM%d_F32", USER_RAM_PT - 46000)
+    MB.writeName(pt_ram_name, pt_current)
+
+    scan_count = scan_count + 1
   end
 
-  -- Read PT sensor (returns current in mA)
-  local pt_current = readPTSensor()
-  local pt_ram_name = string.format("USER_RAM%d_F32", USER_RAM_PT - 46000)
-  MB.writeName(pt_ram_name, pt_current)
+  -- Check if it's time to print data for Kipling plotting
+  local print_interval = LJ.CheckInterval(1)
+  if print_interval == 1 and scan_count > 0 then
+    -- Get current timestamp in milliseconds
+    local current_time = MB.readName("CORE_TIMER")
+    local timestamp_ms = (current_time - start_time) / 1000
 
-  if scan_count == 0 then
-    print(string.format("PT Sensor: %.3f mA", pt_current))
-    print("==============================================")
-    print("Data acquisition running. Output to USER_RAM.")
+    -- Build CSV output line
+    local output = string.format("%.0f", timestamp_ms)
+    for i = 1, NUM_STRAIN_GAUGES do
+      output = output .. string.format(",%.6f", strain_voltages[i] or 0)
+    end
+    output = output .. string.format(",%.3f", pt_current)
+
+    -- Print to console (for Kipling plotting)
+    print(output)
   end
 
-  scan_count = scan_count + 1
+  -- Check if it's time to log data to file
+  if ENABLE_FILE_LOGGING and log_file then
+    local log_interval = LJ.CheckInterval(2)
+    if log_interval == 1 and scan_count > 0 then
+      -- Get current timestamp
+      local current_time = MB.readName("CORE_TIMER")
+      local timestamp_ms = (current_time - start_time) / 1000
 
-  -- Status update every 100 scans
-  if scan_count % 100 == 0 then
-    print(string.format("Scan #%d complete (Errors: %d)", scan_count, error_count))
+      -- Build CSV line
+      local log_line = string.format("%.0f", timestamp_ms)
+      for i = 1, NUM_STRAIN_GAUGES do
+        log_line = log_line .. string.format(",%.6f", strain_voltages[i] or 0)
+      end
+      log_line = log_line .. string.format(",%.3f", pt_current) .. "\n"
+
+      -- Write to file
+      log_file:write(log_line)
+      log_file:flush()
+    end
   end
 
-  -- Calculate elapsed time and sleep for remainder
-  local loop_end = MB.readName("CORE_TIMER")
-  local elapsed_us = loop_end - loop_start
-  local sleep_us = interval_us - elapsed_us
-
-  if sleep_us > 0 then
-    MB.wait(sleep_us)
-  else
-    error_count = error_count + 1
-    -- Set error status
-    MB.writeName(string.format("USER_RAM%d_F32", USER_RAM_STATUS - 46000), 1)
-  end
+  -- Small delay to prevent CPU overload
+  MB.wait(1000)  -- 1ms
 end
 
 --------------------------------------------------------------------------------
 -- CLEANUP (unreachable in infinite loop, but good practice)
 --------------------------------------------------------------------------------
+
+if log_file then
+  log_file:close()
+end
 
 print("Stopping Lua script...")
 MB.writeName("LUA_RUN", 0)
