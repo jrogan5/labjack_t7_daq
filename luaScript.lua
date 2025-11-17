@@ -43,20 +43,35 @@ local PT_GAIN = 1                -- Gain for PT sensor channel
 local NUM_STRAIN_GAUGES = 9      -- Total number of strain gauges
 
 -- MUX80 Configuration
--- NOTE: If using X4 connector, update ain_pos to use extended channels (88-95)
--- The MUX80 in X4 mode provides 4 differential channels per board
--- For 9 channels, you'll need 3 MUX80 boards (or 2 boards + 1 direct channel)
+-- IMPORTANT: When using MUX80, only AIN0-3 are available for built-in differential!
+--            AIN4-13 are NOT available when MUX80 is connected.
+--            See documentation: how_to_diff_input_mux80.md
+--
+-- Built-in differential pairs (use these with MUX80):
+--   - AIN0 (+) with AIN1 (-) ← Use this for MUX80 #1
+--   - AIN2 (+) with AIN3 (-) ← Use this for MUX80 #2
+--
+-- For 9 strain gauges with MUX80, recommended configuration:
+--   - 2 MUX80 boards on AIN0/1 and AIN2/3 (8 channels total)
+--   - 1 direct differential connection on AIN8/9 (9th channel)
+--
+-- Extended channels (if using X4 connector with CB37):
+--   - Use extended channel numbers (e.g., AIN64-71 for X3, AIN88-95 for X4)
+--   - Negative channel = Positive channel + 8
+--   - Example: AIN64(+) pairs with AIN72(-), AIN88(+) pairs with AIN96(-)
+--
 local MUX_CONFIGS = {
   -- MUX80 #1 - Strain Gauges 1-4
-  -- Using standard AINs (for CB15 or direct connection)
+  -- Using AIN0/AIN1 differential pair (built-in, compatible with MUX80)
   {
     enable_dio = 0,              -- DIO line for MUX enable (FIO0)
     address_dio = {1, 2},        -- DIO lines for address bits (FIO1, FIO2)
     ain_pos = 0,                 -- AIN0+ for differential input
-    ain_neg = 1,                 -- AIN1- for differential input (or ain_pos+8 for extended)
+    ain_neg = 1,                 -- AIN1- for differential input
     num_channels = 4             -- Number of channels on this MUX
   },
   -- MUX80 #2 - Strain Gauges 5-8
+  -- Using AIN2/AIN3 differential pair (built-in, compatible with MUX80)
   {
     enable_dio = 3,              -- DIO line for MUX enable (FIO3)
     address_dio = {4, 5},        -- DIO lines for address bits (FIO4, FIO5)
@@ -64,13 +79,15 @@ local MUX_CONFIGS = {
     ain_neg = 3,                 -- AIN3- for differential input
     num_channels = 4             -- Number of channels on this MUX
   },
-  -- MUX80 #3 - Strain Gauge 9
+  -- Strain Gauge 9 - Direct connection (no MUX)
+  -- Using AIN8/AIN9 differential pair (AIN8-13 available when NOT using them for MUX)
+  -- Alternative: Use extended channels if using X-series connectors
   {
-    enable_dio = 6,              -- DIO line for MUX enable (FIO6)
-    address_dio = {7, 8},        -- DIO lines for address bits (FIO7, EIO0)
-    ain_pos = 4,                 -- AIN4+ for differential input
-    ain_neg = 5,                 -- AIN5- for differential input
-    num_channels = 1             -- Only using 1 channel on this MUX
+    enable_dio = nil,            -- No MUX enable (direct connection)
+    address_dio = {},            -- No address lines (direct connection)
+    ain_pos = 8,                 -- AIN8+ for differential input
+    ain_neg = 9,                 -- AIN9- for differential input
+    num_channels = 1             -- Single direct channel
   }
 }
 
@@ -112,24 +129,32 @@ print(string.format("Print Interval: %d ms", PRINT_INTERVAL_MS))
 print(string.format("CSV Logging: %s", ENABLE_FILE_LOGGING and "ENABLED" or "DISABLED"))
 print("==============================================")
 
+-- Ensure analog inputs are powered on
+MB.writeName("POWER_AIN", 1)
+
 -- Configure all DIO pins as outputs for MUX control
 for i, mux in ipairs(MUX_CONFIGS) do
-  -- Set enable pin as output
-  local enable_name = string.format("DIO%d_DIRECTION", mux.enable_dio)
-  MB.writeName(enable_name, 1)  -- 1 = output
+  if mux.enable_dio then  -- Only configure if MUX is used (not direct connection)
+    -- Set enable pin as output
+    local enable_name = string.format("DIO%d_DIRECTION", mux.enable_dio)
+    MB.writeName(enable_name, 1)  -- 1 = output
 
-  -- Set address pins as outputs
-  for j, addr_pin in ipairs(mux.address_dio) do
-    local addr_name = string.format("DIO%d_DIRECTION", addr_pin)
-    MB.writeName(addr_name, 1)  -- 1 = output
+    -- Set address pins as outputs
+    for j, addr_pin in ipairs(mux.address_dio) do
+      local addr_name = string.format("DIO%d_DIRECTION", addr_pin)
+      MB.writeName(addr_name, 1)  -- 1 = output
+    end
+
+    -- Disable MUX initially (active low typically)
+    local dio_name = string.format("DIO%d", mux.enable_dio)
+    MB.writeName(dio_name, 1)  -- Disable (high)
+
+    print(string.format("MUX #%d configured: Enable=DIO%d, AIN%d/AIN%d",
+                        i, mux.enable_dio, mux.ain_pos, mux.ain_neg))
+  else
+    -- Direct connection (no MUX)
+    print(string.format("Channel #%d (direct): AIN%d/AIN%d", i, mux.ain_pos, mux.ain_neg))
   end
-
-  -- Disable MUX initially (active low typically)
-  local dio_name = string.format("DIO%d", mux.enable_dio)
-  MB.writeName(dio_name, 1)  -- Disable (high)
-
-  print(string.format("MUX #%d configured: Enable=DIO%d, AIN%d/AIN%d",
-                      i, mux.enable_dio, mux.ain_pos, mux.ain_neg))
 end
 
 -- Configure analog input resolution and settling time
@@ -139,8 +164,10 @@ MB.writeName("AIN_ALL_SETTLING_US", SETTLING_TIME_US)
 -- Initialize file logging if enabled
 local log_file = nil
 if ENABLE_FILE_LOGGING then
-  -- Check if device has SD card support
-  local has_sd = pcall(function() MB.readName("FILE_IO_SIZE_BYTES") end)
+  -- Check if device has SD card support (bit 3 = 8 in HARDWARE_INSTALLED)
+  local hardware = MB.readName("HARDWARE_INSTALLED")
+  local has_sd = (bit.band(hardware, 8) == 8)
+
   if has_sd then
     log_file = io.open(LOG_FILENAME, "w")
     if log_file then
@@ -158,7 +185,8 @@ if ENABLE_FILE_LOGGING then
       ENABLE_FILE_LOGGING = false
     end
   else
-    print("WARNING: SD card not detected. Logging disabled.")
+    print("WARNING: microSD card not detected. Logging disabled.")
+    print("         (SD card feature requires T7-Pro)")
     ENABLE_FILE_LOGGING = false
   end
 end
@@ -187,6 +215,8 @@ print(csv_header)
 
 -- Function to set MUX address (2-bit address for 4 channels)
 local function setMuxAddress(mux_config, channel)
+  if not mux_config.enable_dio then return end  -- Skip for direct connections
+
   -- Channel is 0-3 for 4-channel MUX
   local addr_bit0 = channel % 2
   local addr_bit1 = math.floor(channel / 2) % 2
@@ -202,6 +232,8 @@ end
 
 -- Function to enable/disable MUX (assumes active-low enable)
 local function setMuxEnable(mux_config, enable)
+  if not mux_config.enable_dio then return end  -- Skip for direct connections
+
   local dio_name = string.format("DIO%d", mux_config.enable_dio)
   if enable then
     MB.writeName(dio_name, 0)  -- Enable (low)
